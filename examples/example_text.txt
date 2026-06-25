@@ -1,0 +1,4 @@
+This is a CTF challenge file.
+Some random data here: lorem ipsum dolor sit amet.
+Hidden message: flag{this_is_a_plaintext_flag_example}
+More decoy data follows...
