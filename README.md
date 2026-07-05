@@ -1,149 +1,167 @@
 # ctf-lens
 
-A static analysis tool for CTF challenges. Feed it a file — it finds flags, decodes encodings, carves embedded files, and detects steganography. No external binaries required beyond optional Python packages.
-
-```
-python ctf_lens.py challenge.png --deep --xor
-```
+Static analysis tool for CTF challenge files. Drop a file — it finds flags, decodes encodings, carves embedded files, and detects steganography. No external binaries required beyond optional Python packages.
 
 ---
 
-## Features
+## Installation
 
-| Category | What it does |
-|---|---|
-| **Flag detection** | Regex match for 25+ CTF formats: `flag{}`, `HTB{}`, `picoCTF{}`, `THM{}`, `DUCTF{}` and more |
-| **Encodings** | Base64, hex, ROT13, URL encoding, HTML entities, binary, Morse code |
-| **Steganography** | LSB extraction (PNG/BMP, per-channel), bit-plane analysis, whitespace stego, JPEG DCT comment scan |
-| **File carving** | Magic byte search for embedded JPEG, PNG, ZIP, GZIP, ELF, PDF inside any file |
-| **Archives** | ZIP content listing, encrypted entry detection, nested ZIP detection, comment extraction |
-| **Audio** | WAV/MP3/FLAC metadata scan, ID3v2 tag parsing, LSB audio analysis |
-| **Images** | EXIF metadata, PNG chunk inspection (tEXt, zTXt, iTXt), JPEG APP/COM segment scan |
-| **Executables** | ELF section headers + strings, PE import table, suspicious string extraction |
-| **Network** | PCAP magic detection, basic frame inspection |
-| **Entropy** | Per-file Shannon entropy with context-aware interpretation |
-| **XOR brute-force** | Single-byte XOR 0x01–0xFF with English-text scoring (`--xor` flag) |
-| **Caesar / Atbash / Vigenère** | Cipher detection with word-frequency scoring |
+```bash
+# Clone
+git clone https://github.com/entropixlabs/ctf-lens.git
+cd ctf-lens
 
----
+# Install with optional dependencies (recommended)
+pip install -e ".[full]"
 
-## Requirements
-
-Python 3.10+. No mandatory dependencies — the tool works without any extras.
-
-Optional (better output):
-```
-pip install rich pillow numpy
+# Or install only what you need
+pip install rich          # coloured terminal output
+pip install Pillow numpy  # image LSB steganography analysis
 ```
 
-- `rich` — coloured terminal output with panels and tables
-- `pillow` + `numpy` — LSB steganography extraction from images
+**Python 3.10+ required. Zero mandatory dependencies — runs on stdlib alone.**
 
 ---
 
 ## Usage
 
+### Interactive mode
+
 ```bash
-# Basic scan
-python ctf_lens.py challenge.png
-
-# Deep scan: wider string coverage + more encoding checks
-python ctf_lens.py challenge.wav --deep
-
-# Deep scan + XOR brute-force
-python ctf_lens.py unknown.bin --deep --xor
+ctf-lens
 ```
 
-### Options
+Launches a keyboard-driven TUI: ASCII banner, tool description, mode selection. Drag & drop a file into the terminal to set the path — no typing required.
 
-| Flag | Description |
+### Direct analysis
+
+```bash
+ctf-lens challenge.png          # standard analysis
+ctf-lens challenge.png --deep   # extended checks (slower)
+ctf-lens challenge.png --xor    # + XOR brute-force (keys 0x01–0xFF)
+ctf-lens challenge.png --deep --xor
+```
+
+### As a Python package
+
+```python
+from ctf_lens import analyze, AnalysisResult
+
+result = analyze("challenge.png")
+
+for finding in result.findings:
+    print(f"[{finding.severity}] {finding.title}")
+    print(f"  {finding.data}")
+
+for decoded in result.decoded:
+    print(f"{finding.title}: {decoded.data}")
+```
+
+---
+
+## What it detects
+
+| Category | Techniques |
 |---|---|
-| `--deep` | Increases scan limits for ROT13 and extra encodings (slower) |
-| `--xor` | Brute-forces single-byte XOR keys 0x01–0xFF |
-| `--version` | Print version and exit |
-| `-h` / `--help` | Print help |
+| **Flags** | 25+ CTF platform prefixes: `flag{}`, `HTB{}`, `picoCTF{}`, `THM{}`, `DUCTF{}` and more |
+| **Encodings** | Base64, Hex, ROT13, URL-encoding, HTML entities, binary code, Morse code |
+| **Ciphers** | Caesar (ROT1–25), Atbash, Vigenère hint (Index of Coincidence) |
+| **Steganography** | LSB per-channel (R/G/B/A/L), bit-plane analysis, whitespace stego |
+| **Images** | EXIF metadata, PNG chunks (tEXt/iTXt/zTXt/non-standard), JPEG markers and comments, data after EOI |
+| **Audio** | WAV LSB on samples, non-standard RIFF chunks, MP3 ID3 tags, data after last frame |
+| **Archives** | ZIP (comment, file contents, password detection), GZIP, BZIP2 with decompression bomb protection |
+| **Executables** | ELF/PE strings and sections, Java CLASS, interesting keywords |
+| **Network** | PCAP/PCAPNG flag search, HTTP traffic detection, credential patterns |
+| **General** | Embedded file carving (magic bytes), Shannon entropy analysis, XOR brute-force, URL extraction |
 
 ---
 
-## Supported file types
+## Supported formats
 
-PNG · JPEG · BMP · GIF · WAV · MP3 · FLAC · ZIP · GZIP · BZ2 · ELF · PE (EXE/DLL) · PDF · PCAP · plain text
-
-Unknown file types fall back to general analysis (strings, entropy, carving, encodings).
+| Type | Formats |
+|---|---|
+| Images | PNG, JPEG, BMP, TIFF, GIF, WEBP |
+| Audio | WAV, MP3, FLAC, OGG |
+| Archives | ZIP, GZIP, BZIP2, XZ, 7ZIP, RAR |
+| Executables | ELF, EXE/DLL, Java .class, Mach-O |
+| Documents | PDF, DOC |
+| Network | PCAP, PCAPNG |
+| Crypto | PEM, DER |
+| Text | TXT, any printable file |
 
 ---
 
-## Example output
+## Project structure
 
 ```
-─────────────────────────────────── ctf-lens v0.3.0 ───────────────────────────────────
-
-  File        challenge.png
-  Type        PNG (image)
-  Size        325,983 bytes (318.3 KB)
-  Entropy     7.986 / 8.0
-  MD5         9b2a3884547d0fc65418243cba308373
-
-╭──────────────────────────────────────────────────╮
-│ 🔴 Critical: 3   🟡 Medium: 0   ⚪ Info: 4        │
-╰──────────────────────────────────────────────────╯
-
-🔴 🚩 Flag found!
-   flag{example_flag_hidden_in_lsb}
-   Source: LSB extraction, channel R
-
-🔴 ⚠️ LSB stego suspected — channel R
-   LSB entropy: 0.030 (normal ≈1.0). Bits are non-random.
-
-🔴 ⚠️ LSB stego suspected — channel G
-   LSB entropy: 0.028
+ctf_lens/
+├── config.py          — all constants and thresholds
+├── models.py          — Finding, AnalysisResult dataclasses
+├── registry.py        — flag registration and deduplication
+├── utils.py           — entropy, file type detection, hashing, string extraction
+├── decoders.py        — Base64, Hex, ROT13, XOR, URL, HTML, binary, Morse
+├── _lsb_common.py     — shared LSB math (used by image and audio independently)
+├── core.py            — main analyze() orchestrator + general analysis
+├── output.py          — Rich coloured output and plain-text fallback
+├── tui.py             — interactive terminal UI
+├── cli.py             — argparse CLI for power users
+└── analyzers/
+    ├── image.py       — EXIF, PNG chunks, JPEG DCT
+    ├── lsb_image.py   — LSB steganography for images
+    ├── audio.py       — WAV, MP3, FLAC + audio LSB
+    ├── archive.py     — ZIP, GZIP, BZIP2
+    ├── text.py        — Caesar, Atbash, Vigenère, whitespace stego
+    ├── binary.py      — ELF, PE
+    ├── network.py     — PCAP
+    └── pdf.py         — PDF
 ```
 
 ---
 
 ## Examples
 
-The `examples/` folder contains six files that demonstrate different hiding techniques. Run the tool against them to see what it finds:
+The `examples/` folder contains sample files demonstrating different hiding techniques:
+
+| File | Technique |
+|---|---|
+| `plaintext_flag.txt` | Flag directly in file |
+| `base64_flag.txt` | Flag encoded as Base64 |
+| `hex_flag.txt` | Flag encoded as hex |
+| `nested.zip` | Flag inside a nested ZIP |
+| `lsb_stego.png` | Flag in LSB of channel R |
+| `polyglot.png` | Flag appended after PNG EOF marker |
+
+Run against all examples:
 
 ```bash
-python ctf_lens.py examples/example_text.txt
-python ctf_lens.py examples/example_base64.txt
-python ctf_lens.py examples/example_hex.txt
-python ctf_lens.py examples/example_archive.zip
-python ctf_lens.py examples/example_lsb.png --deep
-python ctf_lens.py examples/example_polyglot.png
+for f in examples/*; do
+    echo "=== $f ==="; ctf-lens "$f"
+done
 ```
-
-| File | Technique used |
-|---|---|
-| `example_text.txt` | Plaintext flag |
-| `example_base64.txt` | Base64-encoded flag |
-| `example_hex.txt` | Hex-encoded flag |
-| `example_archive.zip` | Flag inside nested ZIP entry |
-| `example_lsb.png` | LSB steganography, channel R |
-| `example_polyglot.png` | Flag appended after PNG EOF marker |
-
----
-
-## Windows notes
-
-PowerShell cp1251 terminals may produce `UnicodeEncodeError` when piping output (e.g. with `Tee-Object`). Set UTF-8 mode before running:
-
-```powershell
-$env:PYTHONUTF8 = "1"
-python ctf_lens.py challenge.png
-```
-
-Or run directly in Windows Terminal without redirection.
 
 ---
 
 ## Limitations
 
-- Single-byte XOR only. Multi-byte keys require manual work.
-- LSB extraction reads bits in `R→G→B`, MSB-first order per pixel. Tools using different bit orders (e.g. some online stego sites) will produce unreadable output — use `zsteg` in that case.
-- Encrypted archives are detected but not cracked.
-- No recursive archive unpacking.
+- Single-byte XOR only (`--xor` flag). Multi-byte XOR and RC4 are not supported.
+- LSB extraction reads bits in order R→G→B, MSB-first per pixel. Tools using a different bit order (some online stego sites) will give unreadable output.
+- Encrypted archives are detected but not cracked. Use `hashcat` or `john` for password recovery.
+- Archives are not recursively unpacked — nested ZIPs are detected and reported, not opened.
+- PDF analysis covers keyword search and embedded file detection only. For full PDF forensics use `pdf-parser.py` or `peepdf`.
+- FLAC analysis is basic (metadata string scan). PICTURE metadata blocks are not parsed.
+
+---
+
+## Windows notes
+
+PowerShell uses cp1251 encoding by default, which may cause `UnicodeEncodeError` when piping output. Fix:
+
+```powershell
+$env:PYTHONUTF8 = "1"
+ctf-lens challenge.png
+```
+
+Or set it permanently in your PowerShell profile.
 
 ---
 
