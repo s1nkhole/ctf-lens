@@ -1,0 +1,27 @@
+[build-system]
+requires      = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name        = "ctf-lens"
+version     = "0.3.0"
+description = "Static analysis tool for CTF challenge files"
+readme      = "README.md"
+license     = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies    = []          # zero mandatory deps — stdlib only
+
+[project.optional-dependencies]
+full = [
+    "rich>=13.0",
+    "Pillow>=10.0",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+# This makes `ctf-lens` work as a command on any OS after `pip install .`
+ctf-lens = "ctf_lens.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ctf_lens*"]
