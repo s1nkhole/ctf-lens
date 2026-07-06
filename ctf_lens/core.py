@@ -101,7 +101,7 @@ def _find_b64(strings: list[str], result: AnalysisResult) -> None:
             decoded = try_decode_base64(candidate)
             if not decoded:
                 continue
-            if looks_like_flag(decoded):
+            if looks_like_flag(decoded) and flag_is_clean(decoded):
                 register_flag(decoded, result, source=f'base64: {candidate[:60]}')
             else:
                 result.decoded.append(Finding(
@@ -124,7 +124,7 @@ def _find_hex(strings: list[str], result: AnalysisResult) -> None:
             decoded = try_decode_hex(candidate)
             if not decoded:
                 continue
-            if looks_like_flag(decoded):
+            if looks_like_flag(decoded) and flag_is_clean(decoded):
                 register_flag(decoded, result, source=f'hex: {candidate[:40]}')
             else:
                 result.decoded.append(Finding(

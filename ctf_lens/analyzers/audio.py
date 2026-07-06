@@ -11,7 +11,7 @@ from ..config import (
 )
 from .._lsb_common import lsb_entropy, lsb_bits_to_bytes
 from ..models import Finding, AnalysisResult
-from ..utils import looks_like_flag, safe_decode, extract_strings
+from ..utils import looks_like_flag, safe_decode, extract_strings, flag_is_clean
 from ..registry import register_flag
 
 import string as _string
@@ -114,7 +114,7 @@ def _extract_audio_lsb_text(lsb_bits, result: AnalysisResult) -> None:
         text     = sample_bytes.decode('utf-8', errors='ignore')
         readable = ''.join(c for c in text if c in _string.printable)
         if len(readable) >= 5:
-            if looks_like_flag(readable):
+            if looks_like_flag(readable) and flag_is_clean(readable):
                 register_flag(
                     readable, result,
                     source='LSB [audio samples]',
@@ -221,7 +221,7 @@ def _analyze_mp3(data: bytes, result: AnalysisResult) -> None:
                 technique   = 'Audio Tags',
             ))
 
-            if looks_like_flag(id3_text):
+            if looks_like_flag(id3_text) and flag_is_clean(id3_text):
                 result.findings.append(Finding(
                     title       = '🚩 Flag in ID3 tags!',
                     severity    = 'HIGH',
@@ -297,5 +297,5 @@ def _analyze_flac(data: bytes, result: AnalysisResult) -> None:
     ))
     strings = extract_strings(data[:65536])
     for s in strings:
-        if looks_like_flag(s):
+        if looks_like_flag(s) and flag_is_clean(s):
             register_flag(s, result, source='FLAC metadata')

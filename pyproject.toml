@@ -1,6 +1,6 @@
 [build-system]
 requires      = ["setuptools>=68"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name        = "ctf-lens"
@@ -17,6 +17,12 @@ full = [
     "Pillow>=10.0",
     "numpy>=1.24",
 ]
+test = [
+    "pytest>=7.0",
+    "rich>=13.0",
+    "Pillow>=10.0",
+    "numpy>=1.24",
+]
 
 [project.scripts]
 # This makes `ctf-lens` work as a command on any OS after `pip install .`
@@ -25,3 +31,6 @@ ctf-lens = "ctf_lens.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["ctf_lens*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

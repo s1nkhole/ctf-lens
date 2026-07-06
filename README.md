@@ -1,5 +1,9 @@
 # ctf-lens
 
+[![CI](https://github.com/s1nkhole/ctf-lens/actions/workflows/ci.yml/badge.svg)](https://github.com/s1nkhole/ctf-lens/actions/workflows/ci.yml)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+
 Static analysis tool for CTF challenge files. Drop a file — it finds flags, decodes encodings, carves embedded files, and detects steganography. No external binaries required beyond optional Python packages.
 
 ---
@@ -8,7 +12,7 @@ Static analysis tool for CTF challenge files. Drop a file — it finds flags, de
 
 ```bash
 # Clone
-git clone https://github.com/entropixlabs/ctf-lens.git
+git clone https://github.com/s1nkhole/ctf-lens.git
 cd ctf-lens
 
 # Install with optional dependencies (recommended)
@@ -21,6 +25,15 @@ pip install Pillow numpy  # image LSB steganography analysis
 
 **Python 3.10+ required. Zero mandatory dependencies — runs on stdlib alone.**
 
+### Backward compatibility
+
+The tool used to ship as a single `ctf_lens.py` monolith. It has since been refactored into a proper package (see [Project structure](#project-structure)), but the old invocation still works via a compatibility shim:
+
+```bash
+python ctf_lens.py challenge.png   # still works
+ctf-lens challenge.png             # new, after pip install
+```
+
 ---
 
 ## Usage
@@ -31,7 +44,7 @@ pip install Pillow numpy  # image LSB steganography analysis
 ctf-lens
 ```
 
-Launches a keyboard-driven TUI: ASCII banner, tool description, mode selection. Drag & drop a file into the terminal to set the path — no typing required.
+Launches a keyboard-driven TUI (built with `rich`): ASCII banner, tool description, mode selection. Drag & drop a file into the terminal to set the path — no typing required.
 
 ### Direct analysis
 
@@ -40,12 +53,13 @@ ctf-lens challenge.png          # standard analysis
 ctf-lens challenge.png --deep   # extended checks (slower)
 ctf-lens challenge.png --xor    # + XOR brute-force (keys 0x01–0xFF)
 ctf-lens challenge.png --deep --xor
+ctf-lens --version
 ```
 
 ### As a Python package
 
 ```python
-from ctf_lens import analyze, AnalysisResult
+from ctf_lens import analyze, AnalysisResult, Finding
 
 result = analyze("challenge.png")
 
@@ -54,7 +68,7 @@ for finding in result.findings:
     print(f"  {finding.data}")
 
 for decoded in result.decoded:
-    print(f"{finding.title}: {decoded.data}")
+    print(f"{decoded.title}: {decoded.data}")
 ```
 
 ---
@@ -63,7 +77,7 @@ for decoded in result.decoded:
 
 | Category | Techniques |
 |---|---|
-| **Flags** | 25+ CTF platform prefixes: `flag{}`, `HTB{}`, `picoCTF{}`, `THM{}`, `DUCTF{}` and more |
+| **Flags** | 28 CTF platform prefixes: `flag{}`, `HTB{}`, `picoCTF{}`, `THM{}`, `DUCTF{}`, `CSAW{}`, `DEFCON{}` and more, with a garbage-guard (`flag_is_clean`) to filter false positives out of noisy binary strings |
 | **Encodings** | Base64, Hex, ROT13, URL-encoding, HTML entities, binary code, Morse code |
 | **Ciphers** | Caesar (ROT1–25), Atbash, Vigenère hint (Index of Coincidence) |
 | **Steganography** | LSB per-channel (R/G/B/A/L), bit-plane analysis, whitespace stego |
@@ -87,6 +101,7 @@ for decoded in result.decoded:
 | Documents | PDF, DOC |
 | Network | PCAP, PCAPNG |
 | Crypto | PEM, DER |
+| Database / data | SQLite, HDF5 |
 | Text | TXT, any printable file |
 
 ---
@@ -95,16 +110,16 @@ for decoded in result.decoded:
 
 ```
 ctf_lens/
-├── config.py          — all constants and thresholds
+├── config.py          — all constants, thresholds, flag prefixes, magic bytes
 ├── models.py          — Finding, AnalysisResult dataclasses
 ├── registry.py        — flag registration and deduplication
-├── utils.py           — entropy, file type detection, hashing, string extraction
+├── utils.py           — entropy, file type detection, hashing, string extraction, flag_is_clean
 ├── decoders.py        — Base64, Hex, ROT13, XOR, URL, HTML, binary, Morse
 ├── _lsb_common.py     — shared LSB math (used by image and audio independently)
 ├── core.py            — main analyze() orchestrator + general analysis
-├── output.py          — Rich coloured output and plain-text fallback
+├── output.py          — Rich coloured output and plain-text fallback, __version__
 ├── tui.py             — interactive terminal UI
-├── cli.py             — argparse CLI for power users
+├── cli.py             — argparse CLI entry point (ctf-lens command)
 └── analyzers/
     ├── image.py       — EXIF, PNG chunks, JPEG DCT
     ├── lsb_image.py   — LSB steganography for images
@@ -114,7 +129,26 @@ ctf_lens/
     ├── binary.py      — ELF, PE
     ├── network.py     — PCAP
     └── pdf.py         — PDF
+
+tests/
+├── conftest.py
+├── test_registry.py
+├── test_decoders.py
+├── test_utils.py
+├── test_examples.py                     — end-to-end checks against examples/
+└── test_flag_consistency_regressions.py — flag_is_clean() ROT13/Atbash edge cases
 ```
+
+---
+
+## Testing & CI
+
+```bash
+pip install -e ".[test]"
+pytest -v
+```
+
+Every push and pull request against `main` runs the full suite on Python 3.10–3.13, then builds and validates the sdist/wheel with `twine check`. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ---
 
@@ -124,12 +158,12 @@ The `examples/` folder contains sample files demonstrating different hiding tech
 
 | File | Technique |
 |---|---|
-| `plaintext_flag.txt` | Flag directly in file |
-| `base64_flag.txt` | Flag encoded as Base64 |
-| `hex_flag.txt` | Flag encoded as hex |
-| `nested.zip` | Flag inside a nested ZIP |
-| `lsb_stego.png` | Flag in LSB of channel R |
-| `polyglot.png` | Flag appended after PNG EOF marker |
+| `example_text.txt` | Flag directly in file |
+| `example_base64.txt` | Flag encoded as Base64 |
+| `example_hex.txt` | Flag encoded as hex |
+| `example_archive.zip` | Flag inside an archive |
+| `example_lsb.png` | Flag in LSB of channel R |
+| `example_polyglot.png` | Flag appended after PNG EOF marker |
 
 Run against all examples:
 
@@ -149,6 +183,7 @@ done
 - Archives are not recursively unpacked — nested ZIPs are detected and reported, not opened.
 - PDF analysis covers keyword search and embedded file detection only. For full PDF forensics use `pdf-parser.py` or `peepdf`.
 - FLAC analysis is basic (metadata string scan). PICTURE metadata blocks are not parsed.
+- `flag_is_clean()` is applied to noisy raw-string extraction (`core.py`, `audio.py`, `binary.py`, `text.py`, `network.py`, `pdf.py`) but not to structured-field extraction (`archive.py`, `image.py`, `lsb_image.py`), since those pull flags from discrete metadata fields rather than raw string soup.
 
 ---
 

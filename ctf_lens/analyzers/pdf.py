@@ -5,7 +5,8 @@ Entry point: analyze_pdf(data, result)
 
 from ..config import FLAG_PATTERNS
 from ..models import Finding, AnalysisResult
-from ..utils import safe_decode
+from ..utils import safe_decode, flag_is_clean
+from ..registry import register_flag
 
 
 def analyze_pdf(data: bytes, result: AnalysisResult) -> None:
@@ -35,10 +36,10 @@ def analyze_pdf(data: bytes, result: AnalysisResult) -> None:
     raw_text = safe_decode(data)
     for pat in FLAG_PATTERNS:
         for m in pat.finditer(raw_text):
-            result.findings.append(Finding(
-                title       = '🚩 Flag in PDF!',
-                severity    = 'HIGH',
-                description = 'Flag found in PDF content.',
-                data        = m.group(0),
-                technique   = 'PDF Analysis',
-            ))
+            # PDF raw bytes decode to a large, mostly-binary blob (streams,
+            # object tables, etc.), so guard against junk-adjacent false
+            # positives the same way every other analyzer does, and dedup
+            # via register_flag instead of appending a raw Finding directly.
+            context = raw_text[max(0, m.start() - 10): m.end() + 10]
+            if flag_is_clean(context):
+                register_flag(m.group(0), result, source='PDF content')
