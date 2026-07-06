@@ -8,7 +8,7 @@ import struct
 
 from ..config import INTERESTING_KEYWORDS, MIN_STRING_LEN_EXEC
 from ..models import Finding, AnalysisResult
-from ..utils import looks_like_flag
+from ..utils import looks_like_flag, flag_is_clean
 
 
 def analyze_executable(data: bytes, result: AnalysisResult) -> None:
@@ -24,7 +24,7 @@ def analyze_executable(data: bytes, result: AnalysisResult) -> None:
 
     interesting: list[str] = []
     for s in strings:
-        if looks_like_flag(s):
+        if looks_like_flag(s) and flag_is_clean(s):
             result.findings.append(Finding(
                 title       = '🚩 Flag in binary!',
                 severity    = 'HIGH',

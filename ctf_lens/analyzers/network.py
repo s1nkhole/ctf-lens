@@ -3,8 +3,10 @@ Network capture analyzer: PCAP/PCAPNG.
 Entry point: analyze_network(data, result)
 """
 
+from ..config import FLAG_PATTERNS
 from ..models import Finding, AnalysisResult
-from ..utils import looks_like_flag, safe_decode
+from ..utils import safe_decode, flag_is_clean
+from ..registry import register_flag
 
 
 def analyze_network(data: bytes, result: AnalysisResult) -> None:
@@ -15,15 +17,17 @@ def analyze_network(data: bytes, result: AnalysisResult) -> None:
         technique   = 'Network Analysis',
     ))
 
+    # The whole capture decodes to one large, mostly-binary blob, so a flag
+    # pattern can match anywhere in the noise. Guard with flag_is_clean (like
+    # every other analyzer does for raw byte extraction) and dedup via
+    # register_flag instead of just checking looks_like_flag on the entire
+    # file and reporting the first 500 chars regardless of where it matched.
     text_content = safe_decode(data)
-    if looks_like_flag(text_content):
-        result.findings.append(Finding(
-            title       = '🚩 Flag in PCAP payload!',
-            severity    = 'HIGH',
-            description = 'Flag found in network traffic.',
-            data        = text_content[:500],
-            technique   = 'Network Analysis',
-        ))
+    for pat in FLAG_PATTERNS:
+        for m in pat.finditer(text_content):
+            context = text_content[max(0, m.start() - 10): m.end() + 10]
+            if flag_is_clean(context):
+                register_flag(m.group(0), result, source='PCAP payload')
 
     http_patterns = [b'HTTP/1.', b'HTTP/2', b'GET /', b'POST /', b'Host: ']
     found_http    = [p.decode() for p in http_patterns if p in data]
