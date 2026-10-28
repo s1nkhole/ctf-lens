@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name        = "ctf-lens"
-version     = "0.4.0"
+version     = "0.5.0"
 description = "Static analysis tool for CTF challenge files"
 readme      = "README.md"
 license     = { text = "MIT" }

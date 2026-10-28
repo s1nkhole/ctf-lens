@@ -42,6 +42,10 @@ class AnalysisResult:
     layers:          list[tuple[str, bytes]] = field(default_factory=list, repr=False)
     # Paths written by --extract
     extracted:       list[str]    = field(default_factory=list)
+    # Indicators of compromise by type: {'domain': [...], 'ipv4': [...], ...}
+    iocs:            dict[str, list[str]] = field(default_factory=dict)
+    # Structured per-format details for --json (e.g. details['pe'])
+    details:         dict[str, Any] = field(default_factory=dict)
 
     def flags(self) -> list[str]:
         """Every distinct flag string found, in discovery order (HIGH findings first)."""
@@ -75,6 +79,8 @@ class AnalysisResult:
             'findings':  [asdict(f) for f in self.findings],
             'decoded':   [asdict(f) for f in self.decoded],
             'extracted': list(self.extracted),
+            'iocs':      {k: list(v) for k, v in self.iocs.items()},
+            'details':   self.details,
         }
 
 

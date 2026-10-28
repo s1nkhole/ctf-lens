@@ -38,6 +38,12 @@ from .carving import find_embedded
 from .peel import peel_layers
 from .xorcrack import crack_repeating_xor, known_plaintext_xor
 from .extract import save_artifacts
+from .ioc import report_iocs
+
+EXTRACT_HINT = 'Re-run with --extract'
+# Categories where string-level indicators are meaningful; images/audio/archives are mostly noise.
+IOC_MAX_ENTROPY = 7.5
+IOC_CATEGORIES = frozenset({'executable', 'java', 'text', 'network', 'document', 'unknown'})
 
 
 # ── Entropy finding ───────────────────────────────────────────────────────────
@@ -425,6 +431,12 @@ def _analyze(
     if xor_bruteforce:
         analyze_xor_bruteforce(data, result)
 
+    # Network/host indicators (domains, IPs, registry keys, wallets, ...)
+    # (High-entropy files of unknown type are encrypted/compressed blobs: their "strings" are noise.)
+    noise = category == 'unknown' and entropy >= IOC_MAX_ENTROPY
+    if deep or (not noise and (category in IOC_CATEGORIES or filetype == 'PDF')):
+        report_iocs(strings, result)
+
     # Specialized analysis dispatched by file category
     # Imported here (not at module level) to break the circular import:
     # core → analyzers → registry  (analyzers never import core directly)
@@ -445,6 +457,10 @@ def _analyze(
 
     if extract_dir:
         result.extracted = save_artifacts(data, result, extract_dir)
+        # The "re-run with --extract" advice is moot once the files are saved.
+        for f in (*result.findings, *result.decoded):
+            if f.hint.startswith(EXTRACT_HINT):
+                f.hint = 'Saved by --extract (see the list of extracted files).'
 
     # Sort: HIGH first, then MEDIUM, LOW, INFO; stable within each group
     result.findings.sort(key=lambda f: SEVERITY_ORDER.get(f.severity, 4))

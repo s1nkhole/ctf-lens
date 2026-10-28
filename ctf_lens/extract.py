@@ -23,8 +23,8 @@ def save_artifacts(data: bytes, result: AnalysisResult, outdir: str) -> list[str
     written: list[str] = []
 
     for kind, pos in result.carved:
-        if kind == 'TRAILING':
-            end, ext, label = len(data), 'bin', 'trailing'
+        if kind in ('TRAILING', 'OVERLAY'):
+            end, ext, label = len(data), 'bin', kind.lower()
         else:
             end, ext, label = estimate_end(kind, data, pos), extension_for(kind), kind.lower()
         path = out / f'{base}_{label}_0x{pos:x}.{ext}'
