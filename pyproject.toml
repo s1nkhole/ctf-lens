@@ -4,10 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name        = "ctf-lens"
-version     = "0.3.0"
+version     = "0.4.0"
 description = "Static analysis tool for CTF challenge files"
 readme      = "README.md"
 license     = { text = "MIT" }
+keywords    = ["ctf", "forensics", "steganography", "static-analysis", "security", "malware-analysis"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
 requires-python = ">=3.10"
 dependencies    = []          # zero mandatory deps — stdlib only
 
@@ -23,6 +32,10 @@ test = [
     "Pillow>=10.0",
     "numpy>=1.24",
 ]
+
+[project.urls]
+Homepage = "https://github.com/s1nkhole/ctf-lens"
+Issues   = "https://github.com/s1nkhole/ctf-lens/issues"
 
 [project.scripts]
 # This makes `ctf-lens` work as a command on any OS after `pip install .`

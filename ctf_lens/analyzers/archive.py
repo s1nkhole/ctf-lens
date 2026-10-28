@@ -4,11 +4,17 @@ Entry point: analyze_archive(data, result)
 """
 
 import io
+import os
+import time
 import zipfile
+import zlib
 import gzip
 import bz2
 
-from ..config import MAX_DECOMPRESS_SIZE, MAX_ZIP_FILES_INSPECT
+from ..config import (
+    MAX_DECOMPRESS_SIZE, MAX_ZIP_FILES_INSPECT,
+    CTF_ZIP_PASSWORDS, ZIP_WORDLIST_MAX, ZIP_WORDLIST_SECONDS,
+)
 from ..models import Finding, AnalysisResult
 from ..utils import looks_like_flag, safe_decode
 from ..registry import register_flag
@@ -21,6 +27,81 @@ def analyze_archive(data: bytes, result: AnalysisResult) -> None:
         _analyze_gzip(data, result)
     elif result.filetype == 'BZIP2':
         _analyze_bzip2(data, result)
+
+
+def _try_password(zf: zipfile.ZipFile, info: zipfile.ZipInfo, pwd: bytes) -> bool:
+    """ZipCrypto has a 1-byte check (1/256 false positives), so confirm via the CRC."""
+    try:
+        zf.read(info, pwd=pwd)
+        return True
+    except (RuntimeError, zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, ValueError):
+        return False
+
+
+def _candidate_passwords(result: AnalysisResult, comment: str):
+    seen: set[str] = set()
+
+    def fresh(pw: str):
+        if pw and pw not in seen:
+            seen.add(pw)
+            return True
+        return False
+
+    stem = os.path.splitext(os.path.basename(result.filepath))[0]
+    extras = [stem, stem.lower(), *comment.split()[:20]]
+    for pw in (*CTF_ZIP_PASSWORDS, *extras):
+        if fresh(pw):
+            yield pw
+
+    wordlist = result._options.get('wordlist')
+    if wordlist:
+        deadline = time.monotonic() + ZIP_WORDLIST_SECONDS
+        with open(wordlist, 'r', encoding='utf-8', errors='ignore') as fh:
+            for i, line in enumerate(fh):
+                if i >= ZIP_WORDLIST_MAX or time.monotonic() > deadline:
+                    break
+                pw = line.rstrip('\r\n')
+                if fresh(pw):
+                    yield pw
+
+
+def _crack_zip(zf: zipfile.ZipFile, encrypted: list[zipfile.ZipInfo], result: AnalysisResult) -> str | None:
+    """Try common CTF passwords (plus --wordlist). Returns the password or None."""
+    classic = [i for i in encrypted if i.compress_type != 99 and i.file_size <= 50 * 1024 * 1024]
+    if not classic:
+        if any(i.compress_type == 99 for i in encrypted):
+            result.findings.append(Finding(
+                title       = 'ZIP uses AES encryption',
+                severity    = 'MEDIUM',
+                description = 'AES-encrypted entries cannot be tested with the standard library.',
+                hint        = 'zip2john archive.zip > hash; john hash --wordlist=rockyou.txt',
+                technique   = 'Archive Analysis',
+            ))
+        return None
+    target  = min(classic, key=lambda i: i.file_size)
+    comment = safe_decode(zf.comment) if zf.comment else ''
+    tried   = 0
+    for pw in _candidate_passwords(result, comment):
+        tried += 1
+        if _try_password(zf, target, pw.encode('utf-8', errors='ignore')):
+            zf.setpassword(pw.encode('utf-8', errors='ignore'))
+            result.findings.append(Finding(
+                title       = f'🔓 ZIP password cracked: {pw}',
+                severity    = 'HIGH',
+                description = f'Password found after {tried} guesses; contents were read with it.',
+                data        = pw,
+                hint        = f"unzip -P '{pw}' archive.zip",
+                technique   = 'Archive Analysis',
+            ))
+            return pw
+    result.findings.append(Finding(
+        title       = 'ZIP password not in built-in list',
+        severity    = 'INFO',
+        description = f'Tried {tried} common passwords. Supply --wordlist FILE for more.',
+        hint        = 'zip2john archive.zip > hash; john hash --wordlist=rockyou.txt',
+        technique   = 'Archive Analysis',
+    ))
+    return None
 
 
 def _analyze_zip(data: bytes, result: AnalysisResult) -> None:
@@ -48,6 +129,7 @@ def _analyze_zip(data: bytes, result: AnalysisResult) -> None:
                     data        = '\n'.join(e.filename for e in encrypted[:10]),
                     technique   = 'Archive Analysis',
                 ))
+                _crack_zip(zf, encrypted, result)
 
             if zf.comment:
                 comment = safe_decode(zf.comment)
@@ -134,13 +216,7 @@ def _analyze_gzip(data: bytes, result: AnalysisResult) -> None:
 
         content_text = safe_decode(decompressed)
         if looks_like_flag(content_text):
-            result.findings.append(Finding(
-                title       = '🚩 Flag in GZIP!',
-                severity    = 'HIGH',
-                description = 'Decompressed data contains a flag.',
-                data        = content_text[:300],
-                technique   = 'Archive Analysis',
-            ))
+            register_flag(content_text, result, source='GZIP decompressed content')
 
     except Exception as e:
         result.findings.append(Finding(
@@ -178,13 +254,7 @@ def _analyze_bzip2(data: bytes, result: AnalysisResult) -> None:
         ))
         content_text = safe_decode(decompressed)
         if looks_like_flag(content_text):
-            result.findings.append(Finding(
-                title       = '🚩 Flag in BZIP2!',
-                severity    = 'HIGH',
-                description = 'Decompressed data contains a flag.',
-                data        = content_text[:300],
-                technique   = 'Archive Analysis',
-            ))
+            register_flag(content_text, result, source='BZIP2 decompressed content')
     except Exception as e:
         result.findings.append(Finding(
             title       = 'BZIP2 decompression error',

@@ -37,6 +37,25 @@ def test_polyglot_flag_found_after_eof(example):
     assert "flag{appended_after_eof_example}" in _all_flag_data(result)
 
 
+def test_lsb_flag_found_in_channel_r(example):
+    pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    result = analyze(example("example_lsb.png"))
+    assert "flag{lsb_steganography_example}" in _all_flag_data(result)
+
+
+def test_two_layer_chain_is_solved(example):
+    result = analyze(example("example_chain.txt"))
+    assert "flag{peeled_two_layers_example}" in _all_flag_data(result)
+
+
+def test_examples_do_not_trigger_false_embedded_files(example):
+    # Regression: 2-byte magics ('MZ', 0x1f8b) used to fire inside compressed PNG data.
+    for name in ("example_lsb.png", "example_polyglot.png"):
+        result = analyze(example(name))
+        assert not [f for f in result.findings if f.title.startswith("Embedded")], name
+
+
 def test_analyze_result_has_expected_metadata(example):
     result = analyze(example("example_text.txt"))
     assert result.filetype == "TEXT"

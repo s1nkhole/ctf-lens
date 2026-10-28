@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +27,24 @@ jobs:
         run: pip install -e ".[test]"
 
       - name: Run test suite
+        run: pytest -v
+
+  test-stdlib-only:
+    name: Test (stdlib only, no rich/Pillow/numpy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package WITHOUT optional dependencies
+        run: pip install -e . pytest
+
+      - name: Run test suite (image tests skip themselves when numpy/Pillow are missing)
         run: pytest -v
 
   build:

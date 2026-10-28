@@ -12,12 +12,21 @@ from ..config import (
     MAX_DECOMPRESS_SIZE,
 )
 from ..models import Finding, AnalysisResult
-from ..utils import looks_like_flag, safe_decode
+from ..utils import looks_like_flag, safe_decode, extract_strings, flag_is_clean, detect_filetype
+from ..registry import register_flag
 from .lsb_image import analyze_lsb_image
 
 
 def analyze_image(data: bytes, result: AnalysisResult) -> None:
-    """Dispatch image analysis: EXIF, PNG chunks, LSB, JPEG DCT."""
+    """Dispatch image analysis. Structural parsers need no third-party packages."""
+    # Pure-stdlib parsers run FIRST and independently of Pillow: a deliberately
+    # corrupted PNG (the classic "fix the header" challenge) makes Pillow raise,
+    # and that must not take the chunk/CRC analysis down with it.
+    if result.filetype == 'PNG':
+        _analyze_png_chunks(data, result)
+    elif result.filetype == 'JPEG':
+        _analyze_jpeg_dct(data, result)
+
     try:
         from PIL import Image
         import numpy as np
@@ -35,9 +44,6 @@ def analyze_image(data: bytes, result: AnalysisResult) -> None:
 
         _analyze_exif(img, result)
 
-        if result.filetype == 'PNG':
-            _analyze_png_chunks(data, result)
-
         # Anomalous file size check (BMP/TIFF only — PNG/JPEG compress pixel data)
         expected = width * height * len(img.getbands())
         if len(data) > expected * 1.5 and result.filetype in ('BMP', 'TIFF'):
@@ -53,22 +59,22 @@ def analyze_image(data: bytes, result: AnalysisResult) -> None:
 
         if mode in ('RGB', 'RGBA', 'L'):
             arr = np.array(img)
-            analyze_lsb_image(arr, mode, result)
-
-        if result.filetype == 'JPEG':
-            _analyze_jpeg_dct(data, result)
+            analyze_lsb_image(arr, mode, result, deep=bool(result._options.get('deep')))
 
     except ImportError:
         result.findings.append(Finding(
             title       = 'Pillow/numpy not installed',
             severity    = 'INFO',
-            description = 'For image analysis: pip install Pillow numpy',
+            description = 'For pixel-level analysis (LSB, EXIF): pip install Pillow numpy',
         ))
     except Exception as e:
         result.findings.append(Finding(
-            title       = 'Image analysis error',
+            title       = 'Image decoder error',
             severity    = 'INFO',
-            description = str(e),
+            description = (
+                f'Pillow could not decode the image ({e}). '
+                'Structural checks above still apply; the file may be intentionally damaged.'
+            ),
         ))
 
 
@@ -116,15 +122,38 @@ def _analyze_exif(img, result: AnalysisResult) -> None:
         pass
 
 
+def _recover_ihdr_dimensions(chunk_data: bytes, stored_crc: int) -> list[tuple[int, int]]:
+    """
+    IHDR CRC does not match → try every single-field change of width or height
+    that makes it match. This is the standard CTF "PNG with wrong dimensions" fix.
+    """
+    width, height = struct.unpack('>II', chunk_data[:8])
+    rest          = chunk_data[8:]
+    found: list[tuple[int, int]] = []
+    for new_h in range(1, 1 << 16):
+        if new_h != height and zlib.crc32(b'IHDR' + struct.pack('>II', width, new_h) + rest) == stored_crc:
+            found.append((width, new_h))
+    for new_w in range(1, 1 << 16):
+        if new_w != width and zlib.crc32(b'IHDR' + struct.pack('>II', new_w, height) + rest) == stored_crc:
+            found.append((new_w, height))
+    return found
+
+
 def _analyze_png_chunks(data: bytes, result: AnalysisResult) -> None:
-    """Parse PNG chunk tree; flag non-standard and text chunks."""
-    pos = 8
+    """Parse the PNG chunk tree: CRCs, text chunks, non-standard chunks, data after IEND."""
+    pos       = 8
+    saw_iend  = False
+    broken    = False
+    bad_crc: dict[str, int] = {}
+
     while pos + 12 <= len(data):
         try:
             chunk_len  = struct.unpack('>I', data[pos:pos + 4])[0]
-            chunk_type = data[pos + 4:pos + 8].decode('ascii', errors='replace')
+            type_bytes = data[pos + 4:pos + 8]
+            chunk_type = type_bytes.decode('ascii', errors='replace')
 
             if pos + 12 + chunk_len > len(data):
+                broken = True
                 result.findings.append(Finding(
                     title       = 'Corrupted PNG structure',
                     severity    = 'MEDIUM',
@@ -133,10 +162,43 @@ def _analyze_png_chunks(data: bytes, result: AnalysisResult) -> None:
                         'File may be intentionally corrupted.'
                     ),
                     technique   = 'PNG Analysis',
+                    offset      = pos,
                 ))
                 break
 
             chunk_data = data[pos + 8: pos + 8 + chunk_len]
+            stored_crc = struct.unpack('>I', data[pos + 8 + chunk_len: pos + 12 + chunk_len])[0]
+            if zlib.crc32(type_bytes + chunk_data) & 0xFFFFFFFF != stored_crc:
+                if chunk_type == 'IHDR' and chunk_len == 13:
+                    w, h = struct.unpack('>II', chunk_data[:8])
+                    fixes = _recover_ihdr_dimensions(chunk_data, stored_crc)
+                    if fixes:
+                        fw, fh = fixes[0]
+                        desc = (
+                            f'IHDR CRC does not match the stored size {w}×{h}. '
+                            f'The CRC is valid for {fw}×{fh} — the dimensions were tampered with '
+                            '(often to crop part of the image away).'
+                        )
+                        hint = (
+                            f'Patch IHDR to {fw}×{fh}: width = bytes 16–19, height = bytes 20–23 '
+                            '(big-endian), then reopen the image.'
+                        )
+                    else:
+                        desc = (
+                            f'IHDR CRC does not match (stored size {w}×{h}) and no single '
+                            'width/height change fixes it — other IHDR fields may be damaged.'
+                        )
+                        hint = 'Compare IHDR fields (bit depth, colour type) against the pixel data.'
+                    result.findings.append(Finding(
+                        title       = 'PNG IHDR CRC mismatch',
+                        severity    = 'HIGH',
+                        description = desc,
+                        hint        = hint,
+                        technique   = 'PNG Analysis',
+                        offset      = pos,
+                    ))
+                else:
+                    bad_crc[chunk_type] = bad_crc.get(chunk_type, 0) + 1
 
             if chunk_type == 'tEXt' and chunk_len < 50_000:
                 text    = chunk_data.decode('latin-1', errors='replace')
@@ -147,6 +209,7 @@ def _analyze_png_chunks(data: bytes, result: AnalysisResult) -> None:
                     description = 'Text chunk — popular place for hidden data.',
                     data        = text[:500],
                     technique   = 'PNG Chunks',
+                    offset      = pos,
                 ))
 
             elif chunk_type == 'iTXt' and chunk_len < 50_000:
@@ -155,11 +218,15 @@ def _analyze_png_chunks(data: bytes, result: AnalysisResult) -> None:
                 try:
                     null1   = chunk_data.index(b'\x00')
                     keyword = chunk_data[:null1].decode('latin-1', errors='replace')
+                    compressed = chunk_data[null1 + 1] == 1
                     rest    = chunk_data[null1 + 3:]          # skip 2 compression bytes
                     null2   = rest.index(b'\x00')
                     rest    = rest[null2 + 1:]
                     null3   = rest.index(b'\x00')
-                    text    = rest[null3 + 1:].decode('utf-8', errors='replace')
+                    body    = rest[null3 + 1:]
+                    if compressed:
+                        body = zlib.decompressobj().decompress(body, MAX_DECOMPRESS_SIZE)
+                    text    = body.decode('utf-8', errors='replace')
                     is_flag = looks_like_flag(text)
                     result.findings.append(Finding(
                         title       = '🚩 Flag in PNG iTXt!' if is_flag else f"PNG iTXt chunk '{keyword}'",
@@ -167,6 +234,7 @@ def _analyze_png_chunks(data: bytes, result: AnalysisResult) -> None:
                         description = 'International text chunk.',
                         data        = text[:500],
                         technique   = 'PNG Chunks',
+                        offset      = pos,
                     ))
                 except Exception:
                     pass
@@ -186,6 +254,7 @@ def _analyze_png_chunks(data: bytes, result: AnalysisResult) -> None:
                         description = 'Compressed text chunk.',
                         data        = text[:500],
                         technique   = 'PNG Chunks',
+                        offset      = pos,
                     ))
                 except Exception:
                     pass
@@ -200,11 +269,57 @@ def _analyze_png_chunks(data: bytes, result: AnalysisResult) -> None:
                     ),
                     data        = f'First bytes: {chunk_data[:20].hex()}',
                     technique   = 'PNG Chunks',
+                    offset      = pos,
                 ))
 
             pos += 12 + chunk_len
+            if chunk_type == 'IEND':
+                saw_iend = True
+                break
         except Exception:
+            broken = True
             break
+
+    if bad_crc:
+        listing = ', '.join(f'{k}×{v}' if v > 1 else k for k, v in sorted(bad_crc.items()))
+        result.findings.append(Finding(
+            title       = 'PNG chunk CRC mismatch',
+            severity    = 'MEDIUM',
+            description = (
+                f'CRC check failed for: {listing}. '
+                'The image was edited by hand or the data was patched after encoding.'
+            ),
+            technique   = 'PNG Analysis',
+        ))
+
+    if saw_iend and pos < len(data):
+        trailing = data[pos:]
+        kind, _  = detect_filetype(trailing[:64]) if len(trailing) >= 4 else ('UNKNOWN', '')
+        preview  = ''.join(chr(b) if 32 <= b < 127 else '.' for b in trailing[:60])
+        result.findings.append(Finding(
+            title       = 'Data after PNG IEND',
+            severity    = 'HIGH',
+            description = (
+                f'{len(trailing):,} bytes follow the IEND chunk'
+                + (f' and look like a {kind} file' if kind not in ('UNKNOWN', 'TEXT') else '')
+                + '. Classic polyglot / appended-payload trick.'
+            ),
+            data        = f'Offset: {pos} (0x{pos:X})\nASCII: {preview}',
+            hint        = 'Re-run with --extract DIR to save the trailing bytes.',
+            technique   = 'File Carving',
+            offset      = pos,
+        ))
+        result.carved.append(('TRAILING', pos))
+        for text in extract_strings(trailing):
+            if looks_like_flag(text) and flag_is_clean(text):
+                register_flag(text, result, source=f'data after PNG IEND (offset {pos})')
+    elif not saw_iend and not broken:
+        result.findings.append(Finding(
+            title       = 'PNG has no IEND chunk',
+            severity    = 'MEDIUM',
+            description = 'The file ends without an IEND chunk — truncated or hand-edited.',
+            technique   = 'PNG Analysis',
+        ))
 
 
 def _analyze_jpeg_dct(data: bytes, result: AnalysisResult) -> None:
@@ -274,4 +389,6 @@ def _analyze_jpeg_dct(data: bytes, result: AnalysisResult) -> None:
                 ),
                 data        = f'First bytes: {trailing[:20].hex()}',
                 technique   = 'File Carving',
+                offset      = eoi_pos + 2,
             ))
+            result.carved.append(('TRAILING', eoi_pos + 2))
