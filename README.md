@@ -4,7 +4,46 @@
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-Static analysis tool for CTF challenge files. Drop a file — it finds flags, decodes encodings, carves embedded files, and detects steganography. No external binaries required beyond optional Python packages.
+Static analysis tool for CTF challenge files. Drop a file — it finds flags, unwraps layered encodings, carves embedded files, repairs tampered PNG headers and detects steganography. Pure Python, zero mandatory dependencies, never executes the file it analyses.
+
+```text
+$ ctf-lens examples/example_polyglot.png
+  Type           PNG (image)
+  Size           59,608 bytes (58.2 KB)
+  🔴 Critical: 3  🟡 Medium: 1  ⚪ Info: 2
+
+🔴 🚩 Flag found!  Flag Pattern
+   Source: direct file content
+   flag{appended_after_eof_example}
+
+🔴 Data after PNG IEND  File Carving  (offset 0xE8A4)
+   52 bytes follow the IEND chunk. Classic polyglot / appended-payload trick.
+   💡 Re-run with --extract DIR to save the trailing bytes.
+
+🔴 🚩 Flag found!  Flag Pattern
+   Source: LSB [R bit 0, rows, msb-first]
+   flag{lsb_steganography_example}
+```
+
+One file, two independent hiding techniques, both reported — with the exact offset and the extraction layout, so the finding can be reproduced by hand.
+
+**Why it is useful**
+
+- **Quiet by design.** Embedded-file carving validates structure instead of matching bare magic bytes, so random or compressed data no longer produces phantom `EXE`/`GZIP` hits (covered by regression tests on random input).
+- **Finds what entropy tests miss.** LSB extraction is brute-forced across channels, bit planes, scan order and bit order, so a 30-byte message in a noisy channel is still found.
+- **Unwraps layers.** `rot13 → base64 → gzip` and similar chains are searched automatically and the winning chain is printed.
+- **Robust to damaged files.** PNG/JPEG structure is parsed without Pillow; a tampered IHDR is detected and the original dimensions are recovered from the CRC.
+- **Built for pipelines.** `--json`, `-q`, `--exit-code`, status on stderr, clean stdout.
+
+---
+
+## Quick start
+
+```bash
+pip install "ctf-lens[full] @ git+https://github.com/s1nkhole/ctf-lens.git"
+ctf-lens challenge.png
+ctf-lens challenge.bin --xor --extract out/    # + XOR attacks, save carved files
+```
 
 ---
 
@@ -68,6 +107,10 @@ Options for scripting and harder challenges:
 | `-q`, `--quiet` | Print only the flags found, one per line |
 | `--exit-code` | Exit with status `10` when a flag was found (otherwise `0`) |
 
+**Exit status:** `0` analysed (or no flag with `--exit-code`) · `10` flag found (only with `--exit-code`) · `1` error (missing file, bad option value) · `2` invalid command line.
+
+**`--json` result** (stable top-level keys): `file`, `size`, `type`, `category`, `md5`, `sha256`, `entropy`, `flags` (deduplicated flag strings), `findings` and `decoded` (lists of `{title, description, severity, data, technique, hint, offset}`), `extracted` (paths written by `--extract`).
+
 Progress messages and errors go to **stderr**, so stdout is always safe to pipe:
 
 ```bash
@@ -90,6 +133,25 @@ for finding in result.findings:
 for decoded in result.decoded:
     print(f"{decoded.title}: {decoded.data}")
 ```
+
+---
+
+## How it works
+
+```
+file ─► type detection (validated signatures) ─► strings (ASCII + UTF-16)
+        │
+        ├─► general pass: entropy · flags · multi-layer decode (peel) · base64/hex/rot13 · carving · URLs
+        ├─► optional:     --xor  single-byte · repeating-key · flag-prefix crib
+        └─► by category:  image · audio · archive · text · executable · network · PDF
+                              │
+                              ▼
+        findings sorted by severity ─► console │ --json │ -q (flags only) │ --extract (files on disk)
+```
+
+Flags found by the analyzers are deduplicated through one registry (`registry.py`), so the same flag found via base64, LSB and a ZIP member is reported once, with the first source that found it; the `flags` list in the result merges any that were reported directly. Noisy raw-string matches are filtered by `flag_is_clean()`.
+
+**Safety.** The analysis is static: the package contains no `subprocess`, `eval`/`exec` or network calls, and decompression is capped (256 MB per stream, at most 20 ZIP members inspected, files above the size limit are read only partially). When you open suspicious samples, do it inside a VM anyway.
 
 ---
 
@@ -218,6 +280,32 @@ done
 - Flags with an unknown prefix are reported as "flag-shaped strings" (MEDIUM); add `--flag-format` to promote them to real flags.
 - FLAC analysis is basic (metadata string scan). PICTURE metadata blocks are not parsed.
 - `flag_is_clean()` is applied to noisy raw-string extraction (`core.py`, `audio.py`, `binary.py`, `text.py`, `network.py`, `pdf.py`) but not to structured-field extraction (`archive.py`, `image.py`, `lsb_image.py`), since those pull flags from discrete metadata fields rather than raw string soup.
+
+---
+
+## Development
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[test]"
+pytest -q
+```
+
+Adding an analyzer: write `analyze_<name>(data: bytes, result: AnalysisResult) -> None` in `ctf_lens/analyzers/`, register it for a file category in the dispatcher inside `core.py`, report through `Finding(...)` and `register_flag(...)`. Test files are generated by `tests/helpers.py` at test time, so no binaries are committed; every false-positive fix should come with a test that fails without it.
+
+---
+
+## Roadmap
+
+Planned, not yet implemented:
+
+- PE parser: sections with entropy, imports grouped by API behaviour, packer heuristics, overlay, imphash
+- IOC extraction: IPs, domains, URLs, e-mails, registry keys, crypto addresses
+- PCAP parsing: TCP stream reassembly, HTTP objects, DNS exfiltration
+- Recursive unpacking of nested archives and carved files
+- Static typing and linting in CI, fuzz tests for the parsers
+
+See [CHANGELOG.md](CHANGELOG.md) for what each release added.
 
 ---
 
