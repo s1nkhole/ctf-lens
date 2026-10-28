@@ -47,6 +47,31 @@ WAV_SCAN_LIMIT          = 10_000
 XOR_KEY_RANGE           = range(0x01, 0x100)
 XOR_SAMPLE_SIZE         = 4096
 
+# ── Multi-layer decoding (peel) ───────────────────────────────────────────────
+PEEL_MAX_DEPTH          = 4          # max chain length: base64 → hex → rot13 → ...
+PEEL_MAX_NODES          = 1500       # hard budget of decoded candidates per file
+PEEL_MAX_BLOB           = 256 * 1024 # largest root blob fed to the peel engine
+PEEL_MAX_SECONDS        = 5.0
+PEEL_MAX_TOKENS         = 300
+PEEL_MAX_OUTPUT         = 16 * 1024 * 1024
+
+# ── Repeating-key XOR ─────────────────────────────────────────────────────────
+XOR_MAX_KEY_LEN         = 40
+XOR_MIN_DATA            = 40
+
+# ── ZIP password guessing (stdlib ZipCrypto only) ─────────────────────────────
+ZIP_WORDLIST_MAX        = 1_000_000
+ZIP_WORDLIST_SECONDS    = 20.0
+CTF_ZIP_PASSWORDS: tuple[str, ...] = (
+    'password', 'Password', 'password1', 'password123', 'passw0rd', 'p@ssw0rd',
+    '123456', '12345678', '123456789', '1234', '12345', '000000', '111111',
+    'admin', 'root', 'toor', 'letmein', 'qwerty', 'secret', 'changeme',
+    'flag', 'ctf', 'CTF', 'flag123', 'ctf2024', 'ctf2025', 'ctf2026',
+    'infected', 'malware', 'virus', 'sample', 'hunter2', 'iloveyou',
+    'welcome', 'login', 'test', 'guest', 'default', 'pass', 'zip', 'unzip',
+    'hack', 'hacker', 'hackme', 'challenge', 'picoctf', 'hackthebox', 'tryhackme',
+)
+
 # ── Keyword dictionary (single source of truth) ───────────────────────────────
 INTERESTING_KEYWORDS: tuple[str, ...] = (
     'password', 'passwd', 'secret', 'key', 'flag', 'token',
@@ -128,8 +153,13 @@ EMBEDDED_SIGNATURES: list[tuple[bytes, str]] = [
     (b'\x7fELF',           'ELF'),
     (b'MZ',                'EXE'),
     (b'BZh',               'BZIP2'),
-    (b'7z\xbc\xaf',        '7ZIP'),
+    (b"7z\xbc\xaf'\x1c",  '7ZIP'),
 ]
+
+# Types that legitimately contain copies of their own signature (ZIP members,
+# JPEG thumbnails, PDF revisions) — never report them as "embedded" in themselves.
+SELF_NESTING_TYPES: frozenset[str] = frozenset({'ZIP', 'JPEG', 'PDF'})
+MAX_CARVE_PER_TYPE      = 5
 
 # ── Known safe chunk names ────────────────────────────────────────────────────
 PNG_STANDARD_CHUNKS: frozenset[str] = frozenset({

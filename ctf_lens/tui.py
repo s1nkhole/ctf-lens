@@ -39,7 +39,7 @@ _WHAT_IT_DOES = """\
 Drop a file on it and it will automatically:
 
   [green]•[/green] Detect the file type from magic bytes (PNG, JPEG, ELF, ZIP, WAV, PCAP …)
-  [green]•[/green] Search for [bold]flags[/bold] directly (25+ CTF platform prefixes)
+  [green]•[/green] Search for [bold]flags[/bold] directly (28 CTF platform prefixes, or your own via --flag-format)
   [green]•[/green] Decode [bold]Base64, Hex, ROT13, URL-encoding, HTML entities,
     binary code, Morse code[/bold]
   [green]•[/green] Detect [bold]LSB steganography[/bold] per image/audio channel

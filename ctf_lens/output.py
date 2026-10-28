@@ -3,10 +3,11 @@ Result rendering: rich (coloured) and plain-text fallback.
 """
 
 import re
+import sys
 
 from .models import AnalysisResult, SEVERITY_COLOR, SEVERITY_ICON
 
-__version__ = '0.3.0'
+__version__ = '0.4.0'
 
 try:
     from rich.console import Console
@@ -17,19 +18,21 @@ try:
 except ImportError:
     _RICH_AVAILABLE = False
 
-console = Console() if _RICH_AVAILABLE else None
+console     = Console() if _RICH_AVAILABLE else None
+# Status/progress/warnings go to stderr so stdout stays clean for pipes and --json.
+_err_console = Console(stderr=True) if _RICH_AVAILABLE else None
 
 MAX_DISPLAY_LINES  = 10
 MAX_DECODED_DISPLAY = 8
 
 
 def print_status(msg: str) -> None:
-    """Print a status/warning message (used by core.analyze for file-size warnings)."""
-    if _RICH_AVAILABLE and console:
-        console.print(msg)
+    """Print a status/warning message to stderr (stdout is reserved for results)."""
+    if _RICH_AVAILABLE and _err_console:
+        _err_console.print(msg)
     else:
         clean = re.sub(r'\[/?[a-z_ ]+\]', '', msg)
-        print(clean)
+        print(clean, file=sys.stderr)
 
 
 def print_results(result: AnalysisResult) -> None:
@@ -74,7 +77,8 @@ def print_results(result: AnalysisResult) -> None:
         icon  = SEVERITY_ICON[finding.severity]
         tech  = f'  [dim italic]{finding.technique}[/dim italic]' if finding.technique else ''
 
-        console.print(f'\n{icon} [{color}][bold]{finding.title}[/bold][/{color}]{tech}')
+        off  = f'  [dim](offset 0x{finding.offset:X})[/dim]' if finding.offset is not None else ''
+        console.print(f'\n{icon} [{color}][bold]{finding.title}[/bold][/{color}]{tech}{off}')
         console.print(f'   {finding.description}')
         if finding.data:
             for line in finding.data.splitlines()[:MAX_DISPLAY_LINES]:
@@ -100,6 +104,12 @@ def print_results(result: AnalysisResult) -> None:
             if d.hint:
                 console.print(f'   [green]💡 {d.hint}[/green]')
 
+    if result.extracted:
+        console.print()
+        console.rule('[bold]Extracted files[/bold]')
+        for path in result.extracted:
+            console.print(f'   [green]{path}[/green]')
+
     console.print()
 
 
@@ -116,7 +126,8 @@ def _print_plain(result: AnalysisResult) -> None:
     print()
 
     for finding in result.findings:
-        print(f'[{finding.severity}] {finding.title}')
+        off = f'  (offset 0x{finding.offset:X})' if finding.offset is not None else ''
+        print(f'[{finding.severity}] {finding.title}{off}')
         print(f'  {finding.description}')
         if finding.data:
             for line in finding.data.splitlines()[:MAX_DISPLAY_LINES]:
@@ -136,3 +147,8 @@ def _print_plain(result: AnalysisResult) -> None:
             if d.hint:
                 print(f'  💡 {d.hint}')
             print()
+
+    if result.extracted:
+        print('\n--- Extracted files ---')
+        for path in result.extracted:
+            print(f'  {path}')

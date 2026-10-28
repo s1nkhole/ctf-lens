@@ -5,6 +5,8 @@ Specialized analyzers are called from here via a category dispatcher.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Callable
 
 from .config import (
@@ -14,14 +16,15 @@ from .config import (
     RE_B64, RE_HEX, RE_URL,
     MAX_ROT_STRINGS, XOR_KEY_RANGE, XOR_SAMPLE_SIZE,
     MIN_STRING_LEN, MIN_STRING_LEN_EXEC,
-    MAX_FILE_SIZE, MAX_FILE_SIZE_MB,
+    MAX_FILE_SIZE, MAX_FILE_SIZE_MB, PEEL_MAX_DEPTH,
 )
 from .models import SEVERITY_ORDER
 from .models import Finding, AnalysisResult
 from .utils import (
     shannon_entropy, detect_filetype, compute_hashes,
     extract_strings, looks_like_flag, flag_is_clean,
-    safe_decode, validate_path,
+    safe_decode, validate_path, extract_utf16_strings, printable_ratio,
+    custom_flag_format,
 )
 from .decoders import (
     try_decode_base64, try_decode_hex, try_rot13,
@@ -31,6 +34,10 @@ from .decoders import (
 )
 
 from .registry import register_flag
+from .carving import find_embedded
+from .peel import peel_layers
+from .xorcrack import crack_repeating_xor, known_plaintext_xor
+from .extract import save_artifacts
 
 
 # ── Entropy finding ───────────────────────────────────────────────────────────
@@ -84,6 +91,38 @@ def _analyze_entropy(result: AnalysisResult) -> None:
 
 # ── Individual finders ────────────────────────────────────────────────────────
 
+_RE_ONLY_HEX = re.compile(r'[0-9a-fA-F]+')
+# Unknown-prefix flag shape: word{token}. Reported at MEDIUM only, when no known flag was found.
+_RE_FLAG_SHAPED = re.compile(r'\b[A-Za-z][A-Za-z0-9_]{1,15}\{[A-Za-z0-9_\-!@#$%^&*+=.,~]{6,80}\}')
+
+
+def _is_readable(text: str) -> bool:
+    """Decoder output worth showing: mostly printable, not a '[binary] …' placeholder."""
+    return not text.startswith('[binary]') and printable_ratio(text.encode('latin-1', 'replace')) >= 0.85
+
+
+def _find_flag_shaped(strings: list[str], result: AnalysisResult) -> None:
+    if any(f.technique == 'Flag Pattern' for f in result.findings):
+        return
+    seen: list[str] = []
+    for s in strings:
+        for m in _RE_FLAG_SHAPED.finditer(s):
+            cand = m.group(0)
+            if cand not in seen and ('_' in cand or any(c.isdigit() for c in cand)):
+                seen.append(cand)
+        if len(seen) >= 10:
+            break
+    if seen:
+        result.findings.append(Finding(
+            title       = f'Flag-shaped strings with unknown prefix ({len(seen)})',
+            severity    = 'MEDIUM',
+            description = 'These look like flags but the prefix is not in the built-in list.',
+            data        = '\n'.join(seen),
+            hint        = "Use --flag-format 'PREFIX\\{[^}]+\\}' to treat them as real flags.",
+            technique   = 'Flag Shape',
+        ))
+
+
 def _find_flags_in_strings(strings: list[str], result: AnalysisResult) -> None:
     for s in strings:
         if looks_like_flag(s) and flag_is_clean(s):
@@ -98,12 +137,14 @@ def _find_b64(strings: list[str], result: AnalysisResult) -> None:
             if candidate in seen:
                 continue
             seen.add(candidate)
+            if len(candidate) % 2 == 0 and _RE_ONLY_HEX.fullmatch(candidate):
+                continue                      # a hex string is not base64 — _find_hex covers it
             decoded = try_decode_base64(candidate)
             if not decoded:
                 continue
             if looks_like_flag(decoded) and flag_is_clean(decoded):
                 register_flag(decoded, result, source=f'base64: {candidate[:60]}')
-            else:
+            elif _is_readable(decoded):
                 result.decoded.append(Finding(
                     title       = 'Base64 decoded',
                     severity    = 'INFO',
@@ -126,7 +167,7 @@ def _find_hex(strings: list[str], result: AnalysisResult) -> None:
                 continue
             if looks_like_flag(decoded) and flag_is_clean(decoded):
                 register_flag(decoded, result, source=f'hex: {candidate[:40]}')
-            else:
+            elif _is_readable(decoded):
                 result.decoded.append(Finding(
                     title       = 'Hex decoded',
                     severity    = 'INFO',
@@ -150,37 +191,6 @@ def _find_rot13(strings: list[str], result: AnalysisResult, limit: int = MAX_ROT
                     "print(codecs.decode(open('file').read(),'rot13'))\""
                 ),
             )
-
-
-def _find_embedded_files(data: bytes, result: AnalysisResult) -> None:
-    MAX_PER_TYPE = 5
-    for sig, name in EMBEDDED_SIGNATURES:
-        offset      = MIN_EMBEDDED_OFFSET
-        found_count = 0
-        while found_count < MAX_PER_TYPE:
-            pos = data.find(sig, offset)
-            if pos == -1:
-                break
-            if pos + len(sig) + 16 <= len(data):
-                result.findings.append(Finding(
-                    title       = f'Embedded {name} file',
-                    severity    = 'HIGH',
-                    description = (
-                        f'{name} magic bytes found at offset {pos}. '
-                        'A file is hidden inside this file — classic CTF technique.'
-                    ),
-                    data        = f'Offset: {pos} bytes (0x{pos:X})',
-                    technique   = 'File Carving',
-                ))
-                found_count += 1
-            offset = pos + len(sig)
-        if found_count == MAX_PER_TYPE:
-            result.findings.append(Finding(
-                title       = f'Embedded {name}: showing first {MAX_PER_TYPE} occurrences',
-                severity    = 'INFO',
-                description = f'>{MAX_PER_TYPE} {name} magic bytes found — possibly synthetic file.',
-                technique   = 'File Carving',
-            ))
 
 
 def _find_urls(strings: list[str], result: AnalysisResult) -> None:
@@ -303,6 +313,10 @@ def analyze_xor_bruteforce(data: bytes, result: AnalysisResult) -> None:
                 technique   = 'XOR Cipher',
             ))
 
+    # Multi-byte keys: statistical key recovery, then a known-plaintext (flag prefix) crib.
+    crack_repeating_xor(data, result)
+    known_plaintext_xor(data, result)
+
 
 # ── General analysis (runs on every file) ────────────────────────────────────
 
@@ -311,6 +325,7 @@ def analyze_general(
     strings: list[str],
     result: AnalysisResult,
     deep: bool = False,
+    peel_depth: int = PEEL_MAX_DEPTH,
 ) -> None:
     """
     Universal analysis applied to every file regardless of type.
@@ -318,13 +333,17 @@ def analyze_general(
     """
     _analyze_entropy(result)
     _find_flags_in_strings(strings, result)
+    # Multi-layer chains first, so a flag reachable through base64 → hex is reported
+    # with its full chain instead of as a bare single-layer hit.
+    peel_layers(data, strings, result, peel_depth)
     _find_b64(strings, result)
     _find_hex(strings, result)
     _find_rot13(strings, result, limit=200 if deep else MAX_ROT_STRINGS)
     _find_extra_encodings(strings, result, limit=500 if deep else 200)
-    _find_embedded_files(data, result)
+    find_embedded(data, result)
     _find_urls(strings, result)
     _find_keywords(data, result)
+    _find_flag_shaped(strings, result)
 
 
 # ── Main orchestrator ─────────────────────────────────────────────────────────
@@ -333,15 +352,39 @@ def analyze(
     filepath: str,
     deep: bool = False,
     xor_bruteforce: bool = False,
+    *,
+    flag_format: str | None = None,
+    peel_depth: int = PEEL_MAX_DEPTH,
+    wordlist: str | None = None,
+    extract_dir: str | None = None,
 ) -> AnalysisResult:
     """
     Read a file, detect its type, and run all applicable analyzers.
-    deep=True enables additional checks (slower).
-    xor_bruteforce=True brute-forces XOR keys 0x01–0xFF.
+
+    deep=True            enables additional checks (slower).
+    xor_bruteforce=True  brute-forces single-byte XOR and recovers repeating keys.
+    flag_format          extra flag regex, e.g. r'MYCTF\\{[^}]+\\}' (checked before built-ins).
+    peel_depth           max length of a decoding chain (0 disables multi-layer decoding).
+    wordlist             password list for encrypted ZIPs (on top of the built-in CTF list).
+    extract_dir          write carved files / trailing data / decoded layers here.
     """
+    with custom_flag_format(flag_format):
+        return _analyze(filepath, deep, xor_bruteforce, peel_depth, wordlist, extract_dir)
+
+
+def _analyze(
+    filepath: str,
+    deep: bool,
+    xor_bruteforce: bool,
+    peel_depth: int,
+    wordlist: str | None,
+    extract_dir: str | None,
+) -> AnalysisResult:
     from .output import print_status  # local import to avoid circular dependency
 
     path = validate_path(filepath)
+    if wordlist is not None and not Path(wordlist).is_file():
+        raise FileNotFoundError(f'Wordlist not found: {wordlist}')
 
     file_size = path.stat().st_size
     if file_size > MAX_FILE_SIZE:
@@ -367,16 +410,18 @@ def analyze(
         sha256       = sha256,
         entropy      = entropy,
     )
+    result._options = {'deep': deep, 'wordlist': wordlist}
 
-    # Cache strings once — reused by all analyzers
+    # Cache strings once — reused by all analyzers. UTF-16 strings are added so
+    # wide-char flags (Windows binaries, .NET, some stego tools) are not invisible.
     min_len = MIN_STRING_LEN_EXEC if category == 'executable' else MIN_STRING_LEN
-    strings = extract_strings(data, min_len=min_len)
+    strings = extract_strings(data, min_len=min_len) + extract_utf16_strings(data)
     result._strings_cache = strings
 
     # General analysis — always runs
-    analyze_general(data, strings, result, deep=deep)
+    analyze_general(data, strings, result, deep=deep, peel_depth=peel_depth)
 
-    # Optional XOR brute-force
+    # Optional XOR attacks
     if xor_bruteforce:
         analyze_xor_bruteforce(data, result)
 
@@ -397,6 +442,9 @@ def analyze(
         dispatcher[category](data, result)
     elif filetype == 'PDF':
         _az.pdf.analyze_pdf(data, result)
+
+    if extract_dir:
+        result.extracted = save_artifacts(data, result, extract_dir)
 
     # Sort: HIGH first, then MEDIUM, LOW, INFO; stable within each group
     result.findings.sort(key=lambda f: SEVERITY_ORDER.get(f.severity, 4))

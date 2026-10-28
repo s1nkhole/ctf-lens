@@ -3,6 +3,8 @@ Flag registration — isolated to break the circular import between core and ana
 core.py imports analyzers; analyzers need register_flag → put it here, import from both sides.
 """
 
+import re
+
 from .config import FLAG_PATTERNS
 from .models import Finding, AnalysisResult
 
@@ -21,6 +23,15 @@ def register_flag(flag: str, result: AnalysisResult, source: str, hint: str = ''
             if clean_flag in result._seen_flags:
                 return False
             result._seen_flags.add(clean_flag)
+            # A letter/digit glued in front of the matched prefix usually means the event
+            # uses a longer prefix we do not know (MYCTF{..} matches as CTF{..}). Say so
+            # instead of silently presenting a truncated flag as the answer.
+            glued = re.search(r'[A-Za-z0-9_]+$', flag[:m.start()])
+            if glued:
+                hint = (
+                    f"{hint}  ⚠ Directly preceded by {glued.group(0)[-12:]!r}: the real prefix may be "
+                    "longer. Check the challenge text, or pass --flag-format 'FULLPREFIX\\{[^}]+\\}'."
+                ).strip()
             result.findings.append(Finding(
                 title       = '🚩 Flag found!',
                 severity    = 'HIGH',

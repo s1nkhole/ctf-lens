@@ -9,9 +9,11 @@ import string
 import struct
 import hashlib
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
+from .signatures import validate as _validate_signature, DETECTION_VALIDATED
 from .config import (
     ALLOWED_BASE_PATH, MAGIC_SIGNATURES, MIN_STRING_LEN, MIN_STRING_LEN_EXEC,
     RE_PRINTABLE_STRINGS, RE_PRINTABLE_STRINGS_EXEC, FLAG_PATTERNS,
@@ -58,6 +60,10 @@ def detect_filetype(data: bytes) -> tuple[str, str]:
             continue
         if ftype == '_CAFEBABE':
             continue
+        # A magic number alone is weak ('BM', 'MZ', 0x1f8b show up in plain text
+        # and random data) — require the structural fields behind it to be sane.
+        if ftype in DETECTION_VALIDATED and not _validate_signature(ftype, data, 0):
+            continue
 
         # RIFF: refine subtype from bytes 8–12
         if ftype == 'RIFF' and len(data) > 12:
@@ -102,6 +108,62 @@ def extract_strings(data: bytes, min_len: int = MIN_STRING_LEN) -> list[str]:
         pattern = re.compile(rb'[ -~]{' + str(min_len).encode() + rb',}')
 
     return [m.group(0).decode('ascii', errors='replace') for m in pattern.finditer(data)]
+
+
+# Both patterns START with a literal NUL byte, which lets the regex engine skip
+# straight between NULs instead of trying every offset (~3x faster on random data).
+# LE strings are "c\0c\0…": the lookbehind demands the first character and the
+# match is widened by one byte below.
+_RE_UTF16LE = re.compile(rb'(?<=[ -~])\x00(?:[ -~]\x00){5,}')
+_RE_UTF16BE = re.compile(rb'\x00[ -~](?:\x00[ -~]){5,}')
+UTF16_SCAN_LIMIT = 64 * 1024 * 1024
+
+
+def extract_utf16_strings(data: bytes, limit: int = 50_000) -> list[str]:
+    """Printable UTF-16 (LE and BE, 6+ chars) strings — Windows binaries, .NET, some CTF tricks."""
+    data = data[:UTF16_SCAN_LIMIT]
+    out: list[str] = []
+    for m in _RE_UTF16LE.finditer(data):
+        out.append(data[m.start() - 1:m.end()].decode('utf-16-le', errors='ignore'))
+        if len(out) >= limit:
+            return out
+    for m in _RE_UTF16BE.finditer(data):
+        out.append(m.group(0).decode('utf-16-be', errors='ignore'))
+        if len(out) >= limit:
+            return out
+    return out
+
+
+def printable_ratio(data: bytes) -> float:
+    """Fraction of bytes that are printable ASCII or common whitespace."""
+    if not data:
+        return 0.0
+    ok = sum(32 <= b < 127 or b in (9, 10, 13) for b in data)
+    return ok / len(data)
+
+
+@contextmanager
+def custom_flag_format(regex: str | None):
+    """
+    Temporarily add a user-supplied flag regex (e.g. r'MYCTF\\{[^}]+\\}') in front of
+    the built-in patterns. Every module shares the FLAG_PATTERNS list object, so
+    inserting here makes looks_like_flag / register_flag / flag_is_clean see it.
+    """
+    if not regex:
+        yield
+        return
+    try:
+        pat = re.compile(regex)
+    except re.error as e:
+        raise ValueError(f'Invalid flag format regex {regex!r}: {e}') from e
+    FLAG_PATTERNS.insert(0, pat)
+    try:
+        yield
+    finally:
+        try:
+            FLAG_PATTERNS.remove(pat)
+        except ValueError:
+            pass
 
 
 # ── Flag detection ────────────────────────────────────────────────────────────
