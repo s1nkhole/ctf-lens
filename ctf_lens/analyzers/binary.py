@@ -9,6 +9,7 @@ import struct
 from ..config import INTERESTING_KEYWORDS, MIN_STRING_LEN_EXEC
 from ..models import Finding, AnalysisResult
 from ..utils import looks_like_flag, flag_is_clean
+from .pe import analyze_pe
 
 
 def analyze_executable(data: bytes, result: AnalysisResult) -> None:
@@ -47,7 +48,7 @@ def analyze_executable(data: bytes, result: AnalysisResult) -> None:
     if result.filetype == 'ELF':
         _analyze_elf(data, result)
     elif result.filetype == 'EXE':
-        _analyze_pe(data, result)
+        analyze_pe(data, result)
 
 
 def _analyze_elf(data: bytes, result: AnalysisResult) -> None:
@@ -82,24 +83,3 @@ def _analyze_elf(data: bytes, result: AnalysisResult) -> None:
             description = "ELF contains sections or data named 'flag' or 'ctf'.",
             technique   = 'ELF Analysis',
         ))
-
-
-def _analyze_pe(data: bytes, result: AnalysisResult) -> None:
-    try:
-        e_lfanew = struct.unpack_from('<I', data, 0x3C)[0]
-        if e_lfanew + 6 > len(data):
-            return
-        if data[e_lfanew:e_lfanew + 4] != b'PE\x00\x00':
-            return
-        machine = struct.unpack_from('<H', data, e_lfanew + 4)[0]
-        pe_arch = {0x14C: 'x86', 0x8664: 'x86-64', 0x1C0: 'ARM', 0xAA64: 'AArch64'}.get(
-            machine, f'0x{machine:04X}'
-        )
-        result.findings.append(Finding(
-            title       = f'PE binary (Windows) — {pe_arch}',
-            severity    = 'INFO',
-            description = 'For analysis: strings, PEStudio, x64dbg, Ghidra, IDA.',
-            technique   = 'PE Analysis',
-        ))
-    except Exception:
-        pass

@@ -6,6 +6,7 @@ CLI entry point for power users.
   ctf-lens file.bin --extract out/   — save carved files, trailing data and decoded layers
   ctf-lens file.png --json           — machine-readable result on stdout
   ctf-lens file.png -q --exit-code   — print flags only; exit status 10 when one is found
+  ctf-lens sample.exe --iocs         — indicators only (type<TAB>value), e.g. for grep/sort -u
   ctf-lens                           — interactive TUI
 
 Exit status: 0 = analysed (or no flag with --exit-code), 10 = flag found (--exit-code only),
@@ -50,6 +51,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--json',    action='store_true', help='Print the result as JSON on stdout')
     parser.add_argument('-q', '--quiet', action='store_true',
                         help='Print only the flags found, one per line (pipe-friendly)')
+    parser.add_argument('--iocs', action='store_true',
+                        help='Print only indicators of compromise as "type<TAB>value" lines (domains, IPs, ...)')
     parser.add_argument('--exit-code', action='store_true',
                         help=f'Exit with status {EXIT_FLAG_FOUND} when a flag was found')
     parser.add_argument('--version', action='version',    version=f'ctf-lens {__version__}')
@@ -70,7 +73,7 @@ def main(argv: list[str] | None = None) -> None:
         parser.error('--depth must be >= 0')
 
     # Status lines go to stderr; in --json / --quiet mode stay silent so pipes are clean.
-    chatty = not (args.json or args.quiet)
+    chatty = not (args.json or args.quiet or args.iocs)
     if chatty:
         print_status(f'[dim]Analysing: {args.filepath}[/dim]')
         if args.xor:
@@ -99,6 +102,10 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.json:
             print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        elif args.iocs:
+            for kind, values in result.iocs.items():
+                for value in values:
+                    print(f'{kind}\t{value}')
         elif args.quiet:
             for flag in result.flags():
                 print(flag)
