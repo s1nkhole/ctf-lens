@@ -4,7 +4,7 @@
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-Static analysis tool for CTF challenge files. Drop a file — it finds flags, unwraps layered encodings, carves embedded files, repairs tampered PNG headers and detects steganography. Pure Python, zero mandatory dependencies, never executes the file it analyses.
+Static analysis tool for CTF challenge files. Drop a file — it finds flags, unwraps layered encodings, carves embedded files, repairs tampered PNG headers, detects steganography, and triages Windows executables (packers, imports, overlay, IOCs). Pure Python, zero mandatory dependencies, never executes the file it analyses.
 
 ```text
 $ ctf-lens examples/example_polyglot.png
@@ -33,6 +33,7 @@ One file, two independent hiding techniques, both reported — with the exact of
 - **Finds what entropy tests miss.** LSB extraction is brute-forced across channels, bit planes, scan order and bit order, so a 30-byte message in a noisy channel is still found.
 - **Unwraps layers.** `rot13 → base64 → gzip` and similar chains are searched automatically and the winning chain is printed.
 - **Robust to damaged files.** PNG/JPEG structure is parsed without Pillow; a tampered IHDR is detected and the original dimensions are recovered from the CRC.
+- **Malware triage without a disassembler.** The PE parser (stdlib only, checked against `objdump` on real binaries) reports packer and layout anomalies, import behaviour mapped to ATT&CK ids, overlay payloads and imphash; an IOC extractor with checksum-validated wallets and benign-domain filtering keeps ordinary files quiet.
 - **Built for pipelines.** `--json`, `-q`, `--exit-code`, status on stderr, clean stdout.
 
 ---
@@ -103,13 +104,14 @@ Options for scripting and harder challenges:
 | `--depth N` | Longest decoding chain to try (`base64 → hex → rot13 → …`), default 4, `0` = off |
 | `--extract DIR` | Save carved embedded files, data after EOF and decoded binary layers into `DIR` |
 | `--wordlist FILE` | Extra passwords for encrypted ZIPs (a built-in CTF list is always tried first) |
+| `--iocs` | Print only indicators of compromise as `type<TAB>value` lines (domains, IPs, e-mails, registry keys, wallets, …) |
 | `--json` | Full result as JSON on stdout |
 | `-q`, `--quiet` | Print only the flags found, one per line |
 | `--exit-code` | Exit with status `10` when a flag was found (otherwise `0`) |
 
 **Exit status:** `0` analysed (or no flag with `--exit-code`) · `10` flag found (only with `--exit-code`) · `1` error (missing file, bad option value) · `2` invalid command line.
 
-**`--json` result** (stable top-level keys): `file`, `size`, `type`, `category`, `md5`, `sha256`, `entropy`, `flags` (deduplicated flag strings), `findings` and `decoded` (lists of `{title, description, severity, data, technique, hint, offset}`), `extracted` (paths written by `--extract`).
+**`--json` result** (stable top-level keys): `file`, `size`, `type`, `category`, `md5`, `sha256`, `entropy`, `flags` (deduplicated flag strings), `findings` and `decoded` (lists of `{title, description, severity, data, technique, hint, offset}`), `extracted` (paths written by `--extract`), `iocs` (`{type: [values]}`), `details` (structured per-format data; for PEs `details.pe` has sections, imports, imphash, exports, overlay, …).
 
 Progress messages and errors go to **stderr**, so stdout is always safe to pipe:
 
@@ -133,6 +135,24 @@ for finding in result.findings:
 for decoded in result.decoded:
     print(f"{decoded.title}: {decoded.data}")
 ```
+
+---
+
+### Windows executable example
+
+Abridged output for a synthetic UPX-style sample (built by `tests/helpers.py`, no real malware is shipped):
+
+```text
+[HIGH]   Packer indicator: UPX
+[HIGH]   High-entropy code section 'UPX1' (7.89)
+[MEDIUM] Executable section 'UPX0' is empty on disk
+[MEDIUM] Writable + executable section 'UPX1'
+[MEDIUM] TLS callbacks (1)
+[MEDIUM] Very few imports (2)
+[INFO]   PE EXE: x86-64, PE32+, Windows console
+```
+
+A normal program (the setuptools launchers used while testing) produces only `INFO` lines.
 
 ---
 
@@ -169,6 +189,8 @@ Flags found by the analyzers are deduplicated through one registry (`registry.py
 | **Archives** | ZIP (comment, file contents, encrypted entries cracked with built-in CTF passwords / `--wordlist`), GZIP, BZIP2 with decompression bomb protection |
 | **Executables** | ELF/PE strings and sections, Java CLASS, interesting keywords |
 | **Network** | PCAP/PCAPNG flag search, HTTP traffic detection, credential patterns |
+| **Windows executables** | PE32/PE32+ parsed without dependencies: sections with entropy and MD5, packer section names (UPX, ASPack, VMProtect, …), high-entropy code, W+X sections, entry point outside the code section, TLS callbacks, forged compile timestamps, overlay (with embedded-file detection), Authenticode presence, .NET detection, imports/exports, imphash. Import groups are mapped to MITRE ATT&CK ids (process injection/hollowing, service installation, downloaders, keylogging, …) as hints, not verdicts |
+| **Indicators (IOC)** | Domains, public IPv4, e-mails, registry keys (persistence keys called out), PDB paths, suspicious drop paths, Bitcoin addresses (Base58Check/Bech32 checksum verified), `.onion`, Telegram bot tokens, chat webhooks — from ASCII and UTF-16 strings. Common benign domains are filtered |
 | **PDF** | Flate streams are decompressed and searched (including text split by kerning operators), JavaScript, `/Launch`, `/OpenAction`, embedded files |
 | **General** | Embedded file carving with structural validation (no false hits on random data), UTF-16 strings, Shannon entropy, URL extraction, flag-shaped strings with unknown prefixes |
 
@@ -204,6 +226,8 @@ ctf_lens/
 ├── signatures.py      — structural validation of file signatures, embedded-file end estimation
 ├── carving.py         — embedded-file carving built on signatures.py
 ├── extract.py         — --extract: write carved files and decoded layers to disk
+├── pe.py              — defensive stdlib PE parser (sections, imports, exports, TLS, overlay)
+├── ioc.py             — indicator extraction with validators (checksums, TLD list, benign filter)
 ├── _lsb_common.py     — shared LSB math (used by image and audio independently)
 ├── core.py            — main analyze() orchestrator + general analysis
 ├── output.py          — Rich coloured output and plain-text fallback, __version__
@@ -227,7 +251,8 @@ tests/
 ├── helpers.py                           — builders for synthetic PNG / PE / PDF / ZipCrypto test files
 ├── test_examples.py                     — end-to-end checks against examples/
 ├── test_lsb.py, test_png.py, test_pdf.py, test_peel.py, test_xor.py,
-│   test_zip_crack.py, test_carving.py   — one file per feature, incl. false-positive guards
+│   test_zip_crack.py, test_carving.py,
+│   test_pe.py, test_ioc.py              — one file per feature, incl. false-positive guards and fuzzing
 ├── test_cli.py                          — JSON / exit codes / --flag-format contract
 ├── test_project.py                      — version and .gitignore consistency
 └── test_flag_consistency_regressions.py — flag_is_clean() ROT13/Atbash edge cases
@@ -277,6 +302,8 @@ done
 - Encrypted ZIPs: only ZipCrypto is tested against passwords (stdlib limitation). AES-encrypted archives are reported with a `zip2john` hint. Other archive formats are not cracked.
 - Archives are not recursively unpacked — nested ZIPs are detected and reported, not opened. (Decoded layers and carved files can be saved with `--extract` and analysed again.)
 - PDF: Flate streams are inflated and searched; other filters (LZW, ASCII85, DCT) and encrypted PDFs are not decoded. For full PDF forensics use `pdf-parser.py` or `peepdf`.
+- PE: delay-load imports, resources, the Rich header and Authenticode validation are not parsed; ordinal imports from `ws2_32`/`oleaut32` are hashed as `ordN`, so the imphash can differ from other tools for those; API-group findings are hints (an imported API is not proof of behaviour). The parser was cross-checked against `objdump` on x86 and x64 binaries; ARM64 files parse but had no independent reference.
+- IOC: IPv6, Ethereum and Monero addresses are not extracted; domains need a known TLD and a registrable label of 4+ characters (5+ under two-letter country TLDs) because random bytes otherwise produce `rx.ai`-style matches; packed executables can still yield an occasional spurious short domain.
 - Flags with an unknown prefix are reported as "flag-shaped strings" (MEDIUM); add `--flag-format` to promote them to real flags.
 - FLAC analysis is basic (metadata string scan). PICTURE metadata blocks are not parsed.
 - `flag_is_clean()` is applied to noisy raw-string extraction (`core.py`, `audio.py`, `binary.py`, `text.py`, `network.py`, `pdf.py`) but not to structured-field extraction (`archive.py`, `image.py`, `lsb_image.py`), since those pull flags from discrete metadata fields rather than raw string soup.
@@ -299,8 +326,8 @@ Adding an analyzer: write `analyze_<name>(data: bytes, result: AnalysisResult) -
 
 Planned, not yet implemented:
 
-- PE parser: sections with entropy, imports grouped by API behaviour, packer heuristics, overlay, imphash
-- IOC extraction: IPs, domains, URLs, e-mails, registry keys, crypto addresses
+- PE: resources, delay-load imports, Rich header, Authenticode validation; ELF/Mach-O triage
+- Faster flag search on huge single-line files (the current regex scan dominates run time there)
 - PCAP parsing: TCP stream reassembly, HTTP objects, DNS exfiltration
 - Recursive unpacking of nested archives and carved files
 - Static typing and linting in CI, fuzz tests for the parsers

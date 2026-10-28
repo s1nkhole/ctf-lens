@@ -93,3 +93,178 @@ def build_pdf(streams: list[bytes], extra_objects: bytes = b'') -> bytes:
         comp = zlib.compress(raw)
         out += (f'{i} 0 obj\n<< /Length {len(comp)} /Filter /FlateDecode >>\nstream\n').encode() + comp + b'\nendstream\nendobj\n'
     return out + extra_objects + b'trailer\n<< /Root 1 0 R >>\n%%EOF\n'
+
+
+# ── Full synthetic PE builder ─────────────────────────────────────────────────
+
+def _align(n: int, a: int) -> int:
+    return (n + a - 1) // a * a
+
+
+DEFAULT_IMPORTS = {
+    'KERNEL32.dll': ['ExitProcess', 'GetLastError', 'GetModuleHandleA', 'CreateFileA', 'ReadFile',
+                     'WriteFile', 'CloseHandle', 'GetCommandLineA'],
+    'USER32.dll':   ['MessageBoxA', 'GetMessageA'],
+}
+
+
+def build_pe(
+    *,
+    is64: bool = True,
+    sections: list[dict] | None = None,
+    imports: dict[str, list[str]] | None = None,
+    timestamp: int = 1_700_000_000,
+    entry_section: int = 0,
+    dll: bool = False,
+    subsystem: int = 3,
+    tls_callbacks: int = 0,
+    clr: bool = False,
+    overlay: bytes = b'',
+    cert: bytes = b'',
+    export_names: list[str] | None = None,
+) -> bytes:
+    """
+    Spec-conforming PE32/PE32+ assembled from parts (no compiler needed).
+    sections: [{'name', 'data', 'flags', 'vsize'(optional)}]; data=b'' with a vsize gives an
+    on-disk-empty section (UPX0 style). imports=None uses a plausible default table, {} means none.
+    """
+    width   = 8 if is64 else 4
+    imports = DEFAULT_IMPORTS if imports is None else imports
+    sections = sections if sections is not None else [
+        {'name': '.text', 'data': b'\x55\x8b\xec' + bytes(range(32, 120)) * 6, 'flags': 0x60000020},
+        {'name': '.data', 'data': b'hello world, plain data section. ' * 20, 'flags': 0xC0000040},
+    ]
+    entries = [dict(s) for s in sections]
+    if imports:
+        entries.append({'name': '.idata', 'gen': 'idata', 'flags': 0x40000040})
+    if export_names:
+        entries.append({'name': '.edata', 'gen': 'edata', 'flags': 0x40000040})
+    if tls_callbacks:
+        entries.append({'name': '.tls', 'gen': 'tls', 'flags': 0xC0000040})
+
+    # Pass 1: RVAs (generated sections are sized after their content, so assign provisional pages).
+    optsize  = 240 if is64 else 224
+    nsec     = len(entries)
+    hdr_size = _align(0x80 + 24 + optsize + 40 * nsec, 0x200)
+    image_base = 0x140000000 if is64 else 0x400000
+    rva = 0x1000
+    for e in entries:
+        e['rva'] = rva
+        provisional = len(e.get('data', b'')) if 'gen' not in e else 0x1000
+        rva += _align(max(e.get('vsize', 0), provisional, 1), 0x1000)
+    dirs = {}
+
+    def idata(base: int) -> bytes:
+        dlls = list(imports.items())
+        desc = (len(dlls) + 1) * 20
+        pos, int_pos, iat_pos = desc, [], []
+        for _d, fs in dlls:
+            int_pos.append(pos); pos += (len(fs) + 1) * width
+        for _d, fs in dlls:
+            iat_pos.append(pos); pos += (len(fs) + 1) * width
+        hn: list[list[int]] = []
+        blob = bytearray()
+        for _d, fs in dlls:
+            row = []
+            for f in fs:
+                if f.startswith('#'):
+                    row.append(-1); continue
+                row.append(pos + len(blob))
+                entry = struct.pack('<H', 0) + f.encode() + b'\x00'
+                blob += entry + (b'\x00' if len(entry) % 2 else b'')
+            hn.append(row)
+        name_pos = []
+        for d, _fs in dlls:
+            name_pos.append(pos + len(blob)); blob += d.encode() + b'\x00'
+        out = bytearray(pos + len(blob))
+        out[pos:] = blob
+        ordflag = 1 << (63 if is64 else 31)
+        for k, (_d, fs) in enumerate(dlls):
+            struct.pack_into('<IIIII', out, 20 * k, base + int_pos[k], 0, 0, base + name_pos[k], base + iat_pos[k])
+            for j, f in enumerate(fs):
+                val = (ordflag | int(f[1:])) if f.startswith('#') else base + hn[k][j]
+                for arr in (int_pos[k], iat_pos[k]):
+                    struct.pack_into('<Q' if is64 else '<I', out, arr + width * j, val)
+        dirs[1] = (base, desc)
+        return bytes(out)
+
+    def edata(base: int) -> bytes:
+        names = export_names or []
+        n = len(names)
+        head = 40
+        addr, nptr, ords = head, head + 4 * n, head + 8 * n
+        strs_at = head + 10 * n
+        blob, name_rvas = bytearray(), []
+        for nm in names:
+            name_rvas.append(base + strs_at + len(blob)); blob += nm.encode() + b'\x00'
+        dll_name_rva = base + strs_at + len(blob); blob += b'sample.dll\x00'
+        out = bytearray(strs_at) + blob
+        struct.pack_into('<IIHHIIIIIII', out, 0, 0, 0, 0, 0, dll_name_rva, 1, n, n, base + addr, base + nptr, base + ords)
+        for i in range(n):
+            struct.pack_into('<I', out, addr + 4 * i, 0x1000)
+            struct.pack_into('<I', out, nptr + 4 * i, name_rvas[i])
+            struct.pack_into('<H', out, ords + 2 * i, i)
+        dirs[0] = (base, len(out))
+        return bytes(out)
+
+    def tls(base: int) -> bytes:
+        dir_size = 40 if is64 else 24
+        idx_at, cb_at, raw_at = dir_size, dir_size + 8, dir_size + 8 + (tls_callbacks + 1) * width
+        out = bytearray(raw_at + 8)
+        code_va = image_base + 0x1000
+        fmt = '<QQQQII' if is64 else '<IIIIII'
+        struct.pack_into(fmt, out, 0, image_base + base + raw_at, image_base + base + raw_at + 8,
+                         image_base + base + idx_at, image_base + base + cb_at, 0, 0)
+        for i in range(tls_callbacks):
+            struct.pack_into('<Q' if is64 else '<I', out, cb_at + width * i, code_va + 0x10 * i)
+        dirs[9] = (base, dir_size)
+        return bytes(out)
+
+    for e in entries:
+        if 'gen' in e:
+            e['data'] = {'idata': idata, 'edata': edata, 'tls': tls}[e['gen']](e['rva'])
+    if clr:
+        dirs[14] = (0x1000, 0x48)
+
+    # Pass 2: file layout
+    raw_ptr = hdr_size
+    for e in entries:
+        data = e.get('data', b'')
+        e['rsize'] = _align(len(data), 0x200) if data else 0
+        e['rptr']  = raw_ptr if data else 0
+        e['vsize_f'] = max(e.get('vsize', 0), len(data))
+        raw_ptr += e['rsize']
+    last_rva_end = max((e['rva'] + _align(max(e['vsize_f'], 1), 0x1000) for e in entries), default=0x1000)
+
+    out = bytearray(hdr_size)
+    out[0:2] = b'MZ'
+    struct.pack_into('<I', out, 0x3C, 0x80)
+    out[0x80:0x84] = b'PE\x00\x00'
+    chars = (0x22 if is64 else 0x102) | (0x2000 if dll else 0)
+    struct.pack_into('<HHIIIHH', out, 0x84, 0x8664 if is64 else 0x14C, nsec, timestamp, 0, 0, optsize, chars)
+    opt = 0x98
+    struct.pack_into('<H', out, opt, 0x20B if is64 else 0x10B)
+    struct.pack_into('<I', out, opt + 16, entries[entry_section]['rva'] if entries else 0)
+    if is64:
+        struct.pack_into('<Q', out, opt + 24, image_base)
+    else:
+        struct.pack_into('<I', out, opt + 28, image_base)
+    struct.pack_into('<IIIIH', out, opt + 32, 0x1000, 0x200, 0, 0, 0)       # alignments, versions (unused)
+    struct.pack_into('<I', out, opt + 56, last_rva_end)
+    struct.pack_into('<I', out, opt + 60, hdr_size)
+    struct.pack_into('<HH', out, opt + 68, subsystem, 0x8160)
+    struct.pack_into('<I', out, opt + (108 if is64 else 92), 16)
+    dd = opt + (112 if is64 else 96)
+
+    body = b''.join(e.get('data', b'').ljust(e['rsize'], b'\x00') for e in entries)
+    file_end = hdr_size + len(body) + len(overlay)
+    if cert:
+        dirs[4] = (file_end, len(cert))
+    for k, (r, sz) in dirs.items():
+        struct.pack_into('<II', out, dd + 8 * k, r, sz)
+    table = opt + optsize
+    for i, e in enumerate(entries):
+        name = e['name'].encode()[:8].ljust(8, b'\x00')
+        struct.pack_into('<8sIIIIIIHHI', out, table + 40 * i, name, e['vsize_f'], e['rva'],
+                         e['rsize'], e['rptr'], 0, 0, 0, 0, e['flags'])
+    return bytes(out) + body + overlay + cert
